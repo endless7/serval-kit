@@ -9,10 +9,13 @@
 #include "element/SrSVGClipPath.h"
 #include "element/SrSVGDefs.h"
 #include "element/SrSVGEllipse.h"
+#include "element/SrSVGFilter.h"
+#include "element/SrSVGFilterPrimitives.h"
 #include "element/SrSVGG.h"
 #include "element/SrSVGImage.h"
 #include "element/SrSVGLine.h"
 #include "element/SrSVGLinearGradient.h"
+#include "element/SrSVGMask.h"
 #include "element/SrSVGPath.h"
 #include "element/SrSVGPolyLine.h"
 #include "element/SrSVGPolygon.h"
@@ -50,6 +53,27 @@ static void DumpDomTree(const SrDOM& dom, const SrDOM::Node* node, int depth) {
   }
 }
 
+static bool IsNonRenderingTag(element::SrSVGTag tag) {
+  switch (tag) {
+    case element::SrSVGTag::kDefs:
+    case element::SrSVGTag::kStop:
+    case element::SrSVGTag::kLinearGradient:
+    case element::SrSVGTag::kRadialGradient:
+    case element::SrSVGTag::kClipPath:
+    case element::SrSVGTag::kMask:
+    case element::SrSVGTag::kFilter:
+    case element::SrSVGTag::kFeBlend:
+    case element::SrSVGTag::kFeColorMatrix:
+    case element::SrSVGTag::kFeComposite:
+    case element::SrSVGTag::kFeFlood:
+    case element::SrSVGTag::kFeGaussianBlur:
+    case element::SrSVGTag::kFeOffset:
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool set_string_attribute(element::SrSVGNodeBase* node, const char* name,
                           const char* value) {
   return node->ParseAndSetAttribute(name, value);
@@ -74,6 +98,7 @@ void pre_parse_inherit_attribute(const element::SrSVGNode* parentNode,
   node->inherit_fill_paint_ = parentNode->fill_;
   node->inherit_stroke_paint_ = parentNode->stroke_;
   node->inherit_clip_path_ = parentNode->clip_path_;
+  node->inherit_mask_ = parentNode->mask_;
   node->inherit_opacity_ = parentNode->opacity_;
   node->inherit_fill_opacity_ = parentNode->fill_opacity_;
   node->inherit_stroke_opacity_ = parentNode->stroke_opacity_;
@@ -127,12 +152,28 @@ element::SrSVGNodeBase* construct_svg_node(
     node = element::SrSVGLinearGradient::Make();
   } else if (strcmp(el, "radialGradient") == 0) {
     node = element::SrSVGRadialGradient::Make();
+  } else if (strcmp(el, "mask") == 0) {
+    node = element::SrSVGMask::Make();
   } else if (strcmp(el, "use") == 0) {
     node = element::SrSVGUse::Make();
   } else if (strcmp(el, "image") == 0) {
     node = element::SrSVGImage::Make();
   } else if (strcmp(el, "clipPath") == 0) {
     node = element::SrSVGClipPath::Make();
+  } else if (strcmp(el, "filter") == 0) {
+    node = element::SrSVGFilter::Make();
+  } else if (strcmp(el, "feGaussianBlur") == 0) {
+    node = element::SrSVGFeGaussianBlur::Make();
+  } else if (strcmp(el, "feOffset") == 0) {
+    node = element::SrSVGFeOffset::Make();
+  } else if (strcmp(el, "feColorMatrix") == 0) {
+    node = element::SrSVGFeColorMatrix::Make();
+  } else if (strcmp(el, "feComposite") == 0) {
+    node = element::SrSVGFeComposite::Make();
+  } else if (strcmp(el, "feBlend") == 0) {
+    node = element::SrSVGFeBlend::Make();
+  } else if (strcmp(el, "feFlood") == 0) {
+    node = element::SrSVGFeFlood::Make();
   } else if (strcmp(el, "g") == 0) {
     node = element::SrSVGG::Make();
   } else if (strcmp(el, "text") == 0) {
@@ -159,7 +200,9 @@ element::SrSVGNodeBase* construct_svg_node(
     element::SrSVGNodeBase* childNode =
         construct_svg_node(dom, node, child, id_mapper, holder);
     if (childNode) {
-      node->AppendChild(childNode);
+      if (!IsNonRenderingTag(childNode->Tag())) {
+        node->AppendChild(childNode);
+      }
     }
   }
   return node;
@@ -173,14 +216,28 @@ std::unique_ptr<SrSVGDOM> SrSVGDOM::make(const char* doc, size_t len) {
   if (gEnableDumpDom) {
     DumpDomTree(*xml_dom, xml_dom->GetRootNode(), 0);
   }
-  element::IDMapper* id_mapper = new element::IDMapper();
+  auto id_mapper = std::make_unique<element::IDMapper>();
   std::list<element::SrSVGNodeBase*> holder;
-  auto root = construct_svg_node(*xml_dom, nullptr, xml_dom->GetRootNode(),
-                                 id_mapper, holder);
+  auto* root_node = xml_dom->GetRootNode();
+  if (!root_node) {
+    return nullptr;
+  }
+  auto root =
+      construct_svg_node(*xml_dom, nullptr, root_node, id_mapper.get(), holder);
+  if (!root) {
+    for (auto* node : holder) {
+      delete node;
+    }
+    return nullptr;
+  }
   if (root->Tag() == element::SrSVGTag::kSvg) {
     // root should be svg
-    return std::make_unique<SrSVGDOM>((element::SrSVGSVG*)root, id_mapper,
+    return std::make_unique<SrSVGDOM>((element::SrSVGSVG*)root,
+                                      id_mapper.release(),
                                       std::move(holder), xml_dom);
+  }
+  for (auto* node : holder) {
+    delete node;
   }
   return nullptr;
 }

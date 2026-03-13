@@ -6,6 +6,7 @@
 #define SVG_INCLUDE_PLATFORM_SKITY_SRSKITYCANVAS_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -14,6 +15,7 @@
 #include "canvas/SrCanvas.h"
 #include "skity/io/data.hpp"
 #include "skity/render/canvas.hpp"
+#include "skity/effect/image_filter.hpp"
 
 namespace serval {
 namespace svg {
@@ -120,6 +122,13 @@ class SrSkityCanvas : public canvas::SrCanvas {
   void Translate(float x, float y) override;
   void Transform(const float (&form)[6]) override;
   void ClipPath(canvas::Path* path, SrSVGFillRule clip_rule) override;
+  bool SupportsMasking() const override { return true; }
+  bool SupportsFilters() const override { return true; }
+  void SaveLayer(const SrSVGBox* bounds = nullptr) override;
+  void SaveLayerWithFilter(const SrSVGBox* bounds, const SrSVGPaint* filter, void* id_mapper) override;
+  void RestoreLayer() override;
+  void SetBlendMode(canvas::SrCanvasBlendMode blend_mode) override;
+  void SetMaskIsLuminance(bool is_luminance) override;
 
   std::shared_ptr<::skity::Data> GetSrSvgDrawImageWithData(
       std::shared_ptr<::skity::Data> data, float width, float height,
@@ -135,6 +144,8 @@ class SrSkityCanvas : public canvas::SrCanvas {
   std::unique_ptr<SrPathFactorySkity> path_factory_;
   std::unordered_map<std::string, canvas::LinearGradientModel> lg_models_;
   std::unordered_map<std::string, canvas::RadialGradientModel> rg_models_;
+  std::optional<::skity::BlendMode> blend_mode_override_;
+  bool mask_is_luminance_{false};
 };
 
 }  // namespace skity

@@ -25,6 +25,7 @@ void SrSVGContainer::OnRender(canvas::SrCanvas* canvas,
       SrSVGPaint* local_fill_paint = node->inherit_fill_paint_;
       SrSVGPaint* local_stroke_paint = node->inherit_stroke_paint_;
       SrSVGPaint* local_clip_path = node->inherit_clip_path_;
+      SrSVGPaint* local_mask = node->inherit_mask_;
       std::optional<SrSVGLength> local_stroke_width =
           node->inherit_stroke_width_;
       std::optional<float> local_opacity = node->inherit_opacity_;
@@ -56,12 +57,20 @@ void SrSVGContainer::OnRender(canvas::SrCanvas* canvas,
         node->inherit_clip_path_ = inherit_clip_path_;
       }
 
+      if (node->mask_) {
+        node->inherit_mask_ = node->mask_;
+      } else if (mask_) {
+        node->inherit_mask_ = mask_;
+      } else if (inherit_mask_) {
+        node->inherit_mask_ = inherit_mask_;
+      }
+
       if (node->stroke_width_) {
         node->inherit_stroke_width_ = node->stroke_width_;
       } else if (stroke_width_) {
         node->inherit_stroke_width_ = stroke_width_;
       } else if (inherit_stroke_width_) {
-        node->inherit_stroke_width_ = stroke_width_;
+        node->inherit_stroke_width_ = inherit_stroke_width_;
       }
 
       if (node->fill_opacity_) {
@@ -94,6 +103,7 @@ void SrSVGContainer::OnRender(canvas::SrCanvas* canvas,
       node->inherit_fill_paint_ = local_fill_paint;
       node->inherit_stroke_paint_ = local_stroke_paint;
       node->inherit_clip_path_ = local_clip_path;
+      node->inherit_mask_ = local_mask;
       node->inherit_fill_opacity_ = local_fill_opacity;
       node->inherit_opacity_ = local_opacity;
       node->inherit_stroke_opacity_ = local_stroke_opacity;

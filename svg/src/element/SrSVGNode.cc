@@ -8,9 +8,14 @@
 #endif
 #include <math.h>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #include "canvas/SrCanvas.h"
 #include "element/SrSVGClipPath.h"
+#include "element/SrSVGFilter.h"
+#include "element/SrSVGFilterPrimitives.h"
+#include "element/SrSVGMask.h"
 #include "element/SrSVGTypes.h"
 
 namespace serval {
@@ -21,10 +26,161 @@ const float SrSVGNode::s_stroke_miter_limit = 4.f;
 
 void SrSVGNodeBase::Render(canvas::SrCanvas* const canvas,
                            SrSVGRenderContext& context) {
-  // TODO(renzhongyue): directly return if prepare failed.
   canvas->Save();
   OnPrepareToRender(canvas, context);
-  OnRender(canvas, context);
+  bool filtered = false;
+  bool render_original = false;
+  if (canvas->SupportsFilters() && IsSVGNode() && Tag() != SrSVGTag::kMask &&
+      Tag() != SrSVGTag::kFilter) {
+    auto* svg_node = static_cast<SrSVGNode*>(this);
+    if (svg_node->filter_ && svg_node->filter_->type == SERVAL_PAINT_IRI) {
+      SrSVGBox bounds{0.f, 0.f, 0.f, 0.f};
+      bool has_bounds = false;
+      if (auto path = svg_node->AsPath(canvas->PathFactory(), &context)) {
+        // Apply transform to path for correct bounds calculation
+        bool has_transform = false;
+        for (int i = 0; i < 6; ++i) {
+           // Indices 0 and 3 are scale factors (diagonal), should be 1.0
+           if (i == 0 || i == 3) {
+              if (fabs(svg_node->transform_[i] - 1.0f) > 1e-5f) has_transform = true;
+           } else {
+              if (fabs(svg_node->transform_[i]) > 1e-5f) has_transform = true;
+           }
+        }
+
+        if (has_transform) {
+           path = path->CreateTransformCopy(svg_node->transform_);
+        }
+
+        bounds = path->GetBounds();
+        has_bounds = bounds.width > 0.f && bounds.height > 0.f;
+
+        // Expand bounds by stroke width
+        float stroke_w = 0.f;
+        if (svg_node->stroke_width_.has_value()) {
+           stroke_w = convert_serval_length_to_float(&*svg_node->stroke_width_, &context, SR_SVG_LENGTH_TYPE_OTHER);
+        } else if (svg_node->inherit_stroke_width_.has_value()) {
+            stroke_w = convert_serval_length_to_float(&*svg_node->inherit_stroke_width_, &context, SR_SVG_LENGTH_TYPE_OTHER);
+        }
+
+        // Check if stroke is actually drawn
+        bool has_stroke = false;
+        if (svg_node->stroke_ && svg_node->stroke_->type != SERVAL_PAINT_NONE) {
+            has_stroke = true;
+        } else if (svg_node->inherit_stroke_paint_ && svg_node->inherit_stroke_paint_->type != SERVAL_PAINT_NONE) {
+             // If not overridden locally
+             if (!svg_node->stroke_) has_stroke = true;
+        }
+
+        if (has_stroke) {
+             // Default stroke width is 1.0 if not specified but stroke is present?
+             // Logic in Render usually handles defaults. Here we just want to be safe.
+             if (stroke_w <= 0.f && (!svg_node->stroke_width_.has_value() && !svg_node->inherit_stroke_width_.has_value())) {
+                 stroke_w = 1.f;
+             }
+
+             if (stroke_w > 0.f) {
+                 float half_w = stroke_w * 0.5f;
+                 bounds.left -= half_w;
+                 bounds.top -= half_w;
+                 bounds.width += stroke_w;
+                 bounds.height += stroke_w;
+             }
+        }
+      }
+      canvas->SaveLayerWithFilter(has_bounds ? &bounds : nullptr, svg_node->filter_,
+                                  context.id_mapper);
+      filtered = true;
+
+      // Hack for DropShadow: check if we should render original image
+      if (context.id_mapper) {
+        IDMapper* nodes = static_cast<IDMapper*>(context.id_mapper);
+        std::string id(svg_node->filter_->content.iri + 1);
+        auto it = nodes->find(id);
+        if (it != nodes->end()) {
+          auto* filter_node = static_cast<SrSVGFilter*>(it->second);
+          if (filter_node && filter_node->Tag() == SrSVGTag::kFilter) {
+             // If we have GaussianBlur or Offset, assume it's a shadow and render original on top
+             // This is a workaround because Skity's DropShadow filter might not render original on GPU backend
+             // and we don't support feMerge yet.
+             bool has_blur = false;
+             bool has_offset = false;
+             // Check children
+             // Since SrSVGFilter inherits SrSVGContainer, we can cast it if we include the header
+             // But GetChildren() is protected in SrSVGContainer.
+             // We made it public in previous step (but I need to confirm if it was successful).
+             // SrSVGContainer.h was updated.
+
+             // Wait, SrSVGFilter inherits SrSVGContainer.
+             // SrSVGContainer::GetChildren() is now public (or we made it so).
+             // Let's verify SrSVGFilter.h includes SrSVGContainer.h
+
+             const auto& children = filter_node->GetChildren();
+             for (auto* child : children) {
+               if (child->Tag() == SrSVGTag::kFeGaussianBlur) has_blur = true;
+               if (child->Tag() == SrSVGTag::kFeOffset) has_offset = true;
+             }
+
+             if (has_blur || has_offset) {
+               render_original = true;
+             }
+          }
+        }
+      }
+    }
+  }
+
+  bool masked = false;
+  if (canvas->SupportsMasking() && IsSVGNode() &&
+      Tag() != SrSVGTag::kMask) {
+    auto* svg_node = static_cast<SrSVGNode*>(this);
+    SrSVGPaint* local_mask =
+        svg_node->mask_ != nullptr ? svg_node->mask_ : svg_node->inherit_mask_;
+    if (local_mask && local_mask->type == SERVAL_PAINT_IRI) {
+      IDMapper* nodes = static_cast<IDMapper*>(context.id_mapper);
+      if (nodes) {
+        std::string id(local_mask->content.iri + 1);
+        auto it = nodes->find(id);
+        if (it != nodes->end() && it->second &&
+            it->second->Tag() == SrSVGTag::kMask) {
+          auto* mask_node = static_cast<SrSVGMask*>(it->second);
+          SrSVGBox bounds{0.f, 0.f, 0.f, 0.f};
+          bool has_bounds = false;
+          if (auto path = svg_node->AsPath(canvas->PathFactory(), &context)) {
+            bounds = path->GetBounds();
+            has_bounds = true;
+          }
+
+          canvas->SetMaskIsLuminance(mask_node->mask_is_luminance());
+          canvas->SaveLayer();
+          OnRender(canvas, context);
+          canvas->SetBlendMode(canvas::SrCanvasBlendMode::kDstIn);
+          canvas->Save();
+          if (has_bounds && mask_node->mask_content_units() ==
+                               SR_SVG_OBB_UNIT_TYPE_OBJECT_BOUNDING_BOX) {
+            float xform[6] = {bounds.width, 0.f, 0.f,
+                              bounds.height, bounds.left, bounds.top};
+            canvas->Transform(xform);
+          }
+          mask_node->Render(canvas, context);
+          canvas->Restore();
+          canvas->SetBlendMode(canvas::SrCanvasBlendMode::kSrcOver);
+          canvas->SetMaskIsLuminance(false);
+          canvas->RestoreLayer();
+          masked = true;
+        }
+      }
+    }
+  }
+  if (!masked) {
+    OnRender(canvas, context);
+  }
+  if (filtered) {
+    canvas->RestoreLayer();
+  }
+  if (render_original && !masked) {
+    OnRender(canvas, context);
+  }
   canvas->Restore();
 }
 
@@ -57,6 +213,10 @@ bool SrSVGNode::ParseAndSetAttribute(const char* name, const char* value) {
     stroke_opacity_ = Atof(value);
   } else if (strcmp(name, "clip-path") == 0) {
     clip_path_ = make_serval_paint(value);
+  } else if (strcmp(name, "mask") == 0) {
+    mask_ = make_serval_paint(value);
+  } else if (strcmp(name, "filter") == 0) {
+    filter_ = make_serval_paint(value);
   } else if (strcmp(name, "transform") == 0) {
     ParseTransform(value, transform_);
   } else if (strcmp(name, "color") == 0) {
@@ -71,6 +231,8 @@ SrSVGNode::~SrSVGNode() {
   release_serval_paint(fill_);
   release_serval_paint(stroke_);
   release_serval_paint(clip_path_);
+  release_serval_paint(mask_);
+  release_serval_paint(filter_);
 }
 
 bool SrPreparePattern(canvas::SrCanvas* canvas, SrSVGNodeBase* node,

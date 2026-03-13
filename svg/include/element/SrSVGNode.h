@@ -27,10 +27,18 @@ enum class SrSVGTag {
   kClipPath,
   kDefs,
   kEllipse,
+  kFeBlend,
+  kFeColorMatrix,
+  kFeComposite,
+  kFeFlood,
+  kFeGaussianBlur,
+  kFeOffset,
+  kFilter,
   kG,
   kImage,
   kLine,
   kLinearGradient,
+  kMask,
   kPath,
   kPattern,
   kPolygon,
@@ -116,6 +124,8 @@ class SrSVGNode : public SrSVGNodeBase {
   SrSVGPaint* fill_{nullptr};
   SrSVGPaint* stroke_{nullptr};
   SrSVGPaint* clip_path_{nullptr};
+  SrSVGPaint* mask_{nullptr};
+  SrSVGPaint* filter_{nullptr};
   std::optional<float> opacity_;
   std::optional<float> fill_opacity_;
   std::optional<float> stroke_opacity_;
@@ -136,6 +146,7 @@ class SrSVGNode : public SrSVGNodeBase {
   SrSVGPaint* inherit_fill_paint_{nullptr};
   SrSVGPaint* inherit_stroke_paint_{nullptr};
   SrSVGPaint* inherit_clip_path_{nullptr};
+  SrSVGPaint* inherit_mask_{nullptr};
   std::optional<float> inherit_opacity_;
   std::optional<float> inherit_fill_opacity_;
   std::optional<float> inherit_stroke_opacity_;

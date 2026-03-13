@@ -17,6 +17,7 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Picture;
+import android.graphics.PorterDuff;
 import android.graphics.RadialGradient;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -82,6 +83,9 @@ public class SVGRender {
     Picture picture = new Picture();
     mPictureCanvas =
         picture.beginRecording(viewPort.width(), viewPort.height());
+    if (mPictureCanvas != null) {
+      mPictureCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+    }
     if (mSVGRenderEngineNG != null) {
       mSVGRenderEngineNG.render(this, content, viewPort.left, viewPort.top,
                                 viewPort.width(), viewPort.height());
