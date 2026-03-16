@@ -5,7 +5,6 @@
 #include "platform/harmony/sr_harmony_canvas.h"
 #include "platform/harmony/path_harmony_impl.h"
 #include "utils/SrFloatComparison.h"
-#include <native_drawing/drawing_color_filter.h>
 #include <native_drawing/drawing_matrix.h>
 #include <native_drawing/drawing_path_effect.h>
 #include <native_drawing/drawing_shader_effect.h>
@@ -59,6 +58,32 @@ void SrHarmonyCanvas::DrawLine(const char *, float x1, float y1, float x2, float
 uint8_t static inline ConvertAlpha(float alpha) {
     alpha = std::clamp(alpha, 0.0f, 1.0f);
     return static_cast<uint8_t>(std::round(alpha * 255.0f));
+}
+
+static inline float GetRedFromI32(uint32_t color) {
+    return static_cast<float>((color & 0x00FF0000) >> 16) / 255.0f;
+}
+
+static inline float GetGreenFromI32(uint32_t color) {
+    return static_cast<float>((color & 0x0000FF00) >> 8) / 255.0f;
+}
+
+static inline float GetBlueFromI32(uint32_t color) {
+    return static_cast<float>(color & 0x000000FF) / 255.0f;
+}
+
+static inline uint32_t MakeMaskLuminanceAlphaColor(uint32_t color, float opacity) {
+    float alpha = static_cast<float>((color & 0xFF000000) >> 24) / 255.0f;
+    float luminance = 0.2126f * GetRedFromI32(color) + 0.7152f * GetGreenFromI32(color) +
+                      0.0722f * GetBlueFromI32(color);
+    return static_cast<uint32_t>(ConvertAlpha(alpha * luminance * opacity)) << 24 | 0x00FFFFFF;
+}
+
+static inline uint8_t GetMaskLuminanceAlpha(uint32_t color, float opacity) {
+    float alpha = static_cast<float>((color & 0xFF000000) >> 24) / 255.0f;
+    float luminance = 0.2126f * GetRedFromI32(color) + 0.7152f * GetGreenFromI32(color) +
+                      0.0722f * GetBlueFromI32(color);
+    return ConvertAlpha(alpha * luminance * opacity);
 }
 
 void SrHarmonyCanvas::DrawRect(const char *id, float x, float y, float rx, float ry, float width, float height,
@@ -239,23 +264,34 @@ void SrHarmonyCanvas::InitFillPaint(const SrSVGRenderState &render_state, bool a
 void SrHarmonyCanvas::FillPath(OH_Drawing_Path *path, const SrSVGRenderState &render_state) {
     Save();
     InitFillPaint(render_state, anti_alias_);
+    bool use_luminance_as_alpha =
+        mask_is_luminance_ && blend_mode_ == canvas::SrCanvasBlendMode::kDstIn;
     if (render_state.fill_rule == SR_SVG_EO_FILL) {
         OH_Drawing_PathSetFillType(path, PATH_FILL_TYPE_EVEN_ODD);
     } else {
         OH_Drawing_PathSetFillType(path, PATH_FILL_TYPE_WINDING);
     }
     if (!render_state.fill) {
-        OH_Drawing_BrushSetColor(brush_, NSVG_RGB(0, 0, 0));
-        if (FloatsNotEqual(render_state.fill_opacity, 1)) {
+        OH_Drawing_BrushSetColor(brush_, use_luminance_as_alpha ? 0x00FFFFFF : NSVG_RGB(0, 0, 0));
+        if (use_luminance_as_alpha) {
+            OH_Drawing_BrushSetAlpha(brush_, 0);
+        } else if (FloatsNotEqual(render_state.fill_opacity, 1)) {
             OH_Drawing_BrushSetAlpha(brush_, ConvertAlpha(render_state.fill_opacity));
         }
         OH_Drawing_CanvasAttachBrush(context_, brush_);
         OH_Drawing_CanvasDrawPath(context_, path);
         OH_Drawing_CanvasDetachBrush(context_);
     } else if (render_state.fill && render_state.fill->type == SERVAL_PAINT_COLOR) {
-        OH_Drawing_BrushSetColor(brush_, render_state.fill->content.color.color);
-        if (FloatsNotEqual(render_state.fill_opacity, 1)) {
-            OH_Drawing_BrushSetAlpha(brush_, ConvertAlpha(render_state.fill_opacity));
+        if (use_luminance_as_alpha) {
+            OH_Drawing_BrushSetColor(brush_, 0x00FFFFFF);
+            OH_Drawing_BrushSetAlpha(
+                brush_, GetMaskLuminanceAlpha(render_state.fill->content.color.color,
+                                              render_state.fill_opacity));
+        } else {
+            OH_Drawing_BrushSetColor(brush_, render_state.fill->content.color.color);
+            if (FloatsNotEqual(render_state.fill_opacity, 1)) {
+                OH_Drawing_BrushSetAlpha(brush_, ConvertAlpha(render_state.fill_opacity));
+            }
         }
         OH_Drawing_CanvasAttachBrush(context_, brush_);
         OH_Drawing_CanvasDrawPath(context_, path);
@@ -302,7 +338,11 @@ void SrHarmonyCanvas::DrawLinearGradientShader(OH_Drawing_Canvas *canvas, const 
         } else {
             offsets.push_back(lastOffset);
         }
-        colors.emplace_back(MixColorWithOpacity(stop.stopColor.color, stop.stopOpacity.value));
+        bool use_luminance_as_alpha =
+            mask_is_luminance_ && blend_mode_ == canvas::SrCanvasBlendMode::kDstIn;
+        colors.emplace_back(use_luminance_as_alpha
+                                ? MakeMaskLuminanceAlphaColor(stop.stopColor.color, stop.stopOpacity.value)
+                                : MixColorWithOpacity(stop.stopColor.color, stop.stopOpacity.value));
     }
 
     float x1 = lg_model.x1_;
@@ -386,7 +426,11 @@ void SrHarmonyCanvas::DrawRadialGradientShader(OH_Drawing_Canvas *canvas, const 
         } else {
             offsets.push_back(lastOffset);
         }
-        colors.emplace_back(MixColorWithOpacity(stop.stopColor.color, stop.stopOpacity.value));
+        bool use_luminance_as_alpha =
+            mask_is_luminance_ && blend_mode_ == canvas::SrCanvasBlendMode::kDstIn;
+        colors.emplace_back(use_luminance_as_alpha
+                                ? MakeMaskLuminanceAlphaColor(stop.stopColor.color, stop.stopOpacity.value)
+                                : MixColorWithOpacity(stop.stopColor.color, stop.stopOpacity.value));
     }
     auto rect = OH_Drawing_RectCreate(0, 0, 0, 0);
     OH_Drawing_PathGetBounds(path, rect);
@@ -457,15 +501,24 @@ void SrHarmonyCanvas::DrawRadialGradientShader(OH_Drawing_Canvas *canvas, const 
 void SrHarmonyCanvas::StrokePath(OH_Drawing_Path *path, const SrSVGRenderState &render_state) {
     Save();
     InitStrokePaint(render_state, anti_alias_);
+    bool use_luminance_as_alpha =
+        mask_is_luminance_ && blend_mode_ == canvas::SrCanvasBlendMode::kDstIn;
     if (render_state.fill_rule == SR_SVG_EO_FILL) {
         OH_Drawing_PathSetFillType(path, PATH_FILL_TYPE_EVEN_ODD);
     } else {
         OH_Drawing_PathSetFillType(path, PATH_FILL_TYPE_WINDING);
     }
     if (render_state.stroke && render_state.stroke->type == SERVAL_PAINT_COLOR) {
-        OH_Drawing_PenSetColor(pen_, render_state.stroke->content.color.color);
-        if (FloatsNotEqual(render_state.stroke_opacity, 1)) {
-            OH_Drawing_PenSetAlpha(pen_, ConvertAlpha(render_state.stroke_opacity));
+        if (use_luminance_as_alpha) {
+            OH_Drawing_PenSetColor(pen_, 0x00FFFFFF);
+            OH_Drawing_PenSetAlpha(
+                pen_, GetMaskLuminanceAlpha(render_state.stroke->content.color.color,
+                                            render_state.stroke_opacity));
+        } else {
+            OH_Drawing_PenSetColor(pen_, render_state.stroke->content.color.color);
+            if (FloatsNotEqual(render_state.stroke_opacity, 1)) {
+                OH_Drawing_PenSetAlpha(pen_, ConvertAlpha(render_state.stroke_opacity));
+            }
         }
         OH_Drawing_CanvasAttachPen(context_, pen_);
         OH_Drawing_CanvasDrawPath(context_, path);
@@ -484,6 +537,49 @@ void SrHarmonyCanvas::StrokePath(OH_Drawing_Path *path, const SrSVGRenderState &
         }
     }
     Restore();
+}
+
+void SrHarmonyCanvas::SaveLayer(const SrSVGBox* bounds) {
+    // OH_Drawing_CanvasSaveLayer creates an off-screen compositing layer.
+    // All drawing until RestoreLayer() goes to this temporary buffer.
+    OH_Drawing_Rect* rect = nullptr;
+    if (bounds) {
+        rect = OH_Drawing_RectCreate(bounds->left, bounds->top,
+                                     bounds->left + bounds->width,
+                                     bounds->top + bounds->height);
+    }
+    OH_Drawing_CanvasSaveLayer(context_, rect, nullptr);
+    if (rect) {
+        OH_Drawing_RectDestroy(rect);
+    }
+}
+
+void SrHarmonyCanvas::RestoreLayer() {
+    OH_Drawing_CanvasRestore(context_);
+}
+
+void SrHarmonyCanvas::SetBlendMode(canvas::SrCanvasBlendMode blend_mode) {
+    auto prev = blend_mode_;
+    blend_mode_ = blend_mode;
+    if (blend_mode == canvas::SrCanvasBlendMode::kDstIn &&
+        prev != canvas::SrCanvasBlendMode::kDstIn) {
+        OH_Drawing_Brush* blend_brush = OH_Drawing_BrushCreate();
+        OH_Drawing_BrushSetBlendMode(blend_brush, BLEND_MODE_DST_IN);
+        OH_Drawing_CanvasSaveLayer(context_, nullptr, blend_brush);
+        OH_Drawing_BrushDestroy(blend_brush);
+    } else if (blend_mode == canvas::SrCanvasBlendMode::kSrcOver &&
+               prev == canvas::SrCanvasBlendMode::kDstIn) {
+        OH_Drawing_CanvasRestore(context_);
+    }
+}
+
+void SrHarmonyCanvas::SetMaskIsLuminance(bool is_luminance) {
+    mask_is_luminance_ = is_luminance;
+}
+
+void SrHarmonyCanvas::ApplyLuminanceToAlpha() {
+    // Harmony converts luminance to alpha inline while drawing mask content,
+    // so no post-process pass is required here.
 }
 
 void SrHarmonyCanvas::SetAntiAlias(bool anti_alias) { anti_alias_ = anti_alias; }

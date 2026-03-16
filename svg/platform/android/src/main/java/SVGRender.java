@@ -17,6 +17,8 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Picture;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
 import android.graphics.RadialGradient;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -82,6 +84,9 @@ public class SVGRender {
     Picture picture = new Picture();
     mPictureCanvas =
         picture.beginRecording(viewPort.width(), viewPort.height());
+    if (mPictureCanvas != null) {
+      mPictureCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+    }
     if (mSVGRenderEngineNG != null) {
       mSVGRenderEngineNG.render(this, content, viewPort.left, viewPort.top,
                                 viewPort.width(), viewPort.height());
@@ -223,6 +228,53 @@ public class SVGRender {
     }
   }
 
+  public void saveLayer(float left, float top, float right, float bottom) {
+    if (mPictureCanvas != null) {
+      if (left == 0 && top == 0 && right == 0 && bottom == 0) {
+        // Full canvas layer
+        mPictureCanvas.saveLayer(null, null);
+      } else {
+        RectF bounds = new RectF(left, top, right, bottom);
+        mPictureCanvas.saveLayer(bounds, null);
+      }
+    }
+  }
+
+  public void restoreLayer() {
+    if (mPictureCanvas != null) {
+      mPictureCanvas.restore();
+    }
+  }
+
+  private boolean mDstInLayerActive = false;
+  private boolean mMaskIsLuminance = false;
+
+  public void setBlendMode(int mode) {
+    // mode: 0 = SrcOver (normal), 1 = DstIn
+    if (mPictureCanvas != null) {
+      if (mode == 1 && !mDstInLayerActive) {
+        // Record the full mask into a dedicated layer first, then apply DST_IN
+        // once when that layer is restored back to the content layer.
+        Paint xferPaint = new Paint();
+        xferPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
+        mPictureCanvas.saveLayer(null, xferPaint);
+        mDstInLayerActive = true;
+      } else if (mode == 0 && mDstInLayerActive) {
+        mPictureCanvas.restore();
+        mDstInLayerActive = false;
+      }
+    }
+  }
+
+  public void setMaskIsLuminance(boolean isLuminance) {
+    mMaskIsLuminance = isLuminance;
+  }
+
+  public void applyLuminanceToAlpha() {
+    // Android converts luminance to alpha while drawing mask content when the
+    // DstIn mask layer is active, so no post-process pass is required here.
+  }
+
   private void drawPathWithFillModel(@NonNull Canvas canvas, @NonNull Path path,
                                      FillPaintModel fillPaintModel) {
     if (fillPaintModel != null) {
@@ -243,6 +295,9 @@ public class SVGRender {
       // Note: If fillPaintModel is null which means that the fill label is not set, we need to init
       // default paint and draw.
       Paint paint = initFillPaint();
+      if (useLuminanceAsAlpha()) {
+        paint.setColor(Color.argb(0, 255, 255, 255));
+      }
       canvas.drawPath(path, paint);
     }
   }
@@ -309,7 +364,9 @@ public class SVGRender {
         positions[i] = lastOffset;
       }
       // prepare color
-      colors[i] = getColorWithOpacity(stopModel.mColor, stopModel.mStopOpacity);
+      colors[i] = useLuminanceAsAlpha()
+          ? getMaskLuminanceColor(stopModel.mColor, stopModel.mStopOpacity)
+          : getColorWithOpacity(stopModel.mColor, stopModel.mStopOpacity);
     }
     RectF boundingBox = calculatePathBounds(path);
     float r = rgModel.mFr;
@@ -387,7 +444,9 @@ public class SVGRender {
         positions[i] = lastOffset;
       }
       // prepare color
-      colors[i] = getColorWithOpacity(stopModel.mColor, stopModel.mStopOpacity);
+      colors[i] = useLuminanceAsAlpha()
+          ? getMaskLuminanceColor(stopModel.mColor, stopModel.mStopOpacity)
+          : getColorWithOpacity(stopModel.mColor, stopModel.mStopOpacity);
     }
     float x1 = lgModel.mX1;
     float y1 = lgModel.mY1;
@@ -440,8 +499,9 @@ public class SVGRender {
   private Paint initFillPaint(FillPaintModel fillPaintModel) {
     Paint fillPaint = initFillPaint();
     if (fillPaintModel != null) {
-      fillPaint.setColor(
-          getColorWithOpacity(fillPaintModel.mColor, fillPaintModel.mOpacity));
+      fillPaint.setColor(useLuminanceAsAlpha()
+              ? getMaskLuminanceColor(fillPaintModel.mColor, fillPaintModel.mOpacity)
+              : getColorWithOpacity(fillPaintModel.mColor, fillPaintModel.mOpacity));
     }
     return fillPaint;
   }
@@ -461,7 +521,9 @@ public class SVGRender {
   private Paint initStrokePaint(StrokePaintModel strokePaintModel) {
     Paint strokePaint = initStrokePaint();
     if (strokePaintModel != null) {
-      strokePaint.setColor(getColorWithOpacity(strokePaintModel.mColor,
+      strokePaint.setColor(useLuminanceAsAlpha()
+              ? getMaskLuminanceColor(strokePaintModel.mColor, strokePaintModel.mOpacity)
+              : getColorWithOpacity(strokePaintModel.mColor,
                                                strokePaintModel.mOpacity));
       strokePaint.setStrokeWidth(strokePaintModel.mWith);
       initStrokeExtraInfo(strokePaint, strokePaintModel);
@@ -557,6 +619,23 @@ public class SVGRender {
     alpha = Math.round(alpha * opacity);
     alpha = (alpha < 0) ? 0 : Math.min(alpha, 255);
     return (alpha << 24) | ((int)(color & 0xffffff));
+  }
+
+  private boolean useLuminanceAsAlpha() {
+    return mMaskIsLuminance && mDstInLayerActive;
+  }
+
+  public static int getMaskLuminanceColor(long color, float opacity) {
+    return Color.argb(getMaskLuminanceAlpha(color, opacity), 255, 255, 255);
+  }
+
+  public static int getMaskLuminanceAlpha(long color, float opacity) {
+    float alpha = ((color >> 24) & 0xff) / 255f;
+    float red = ((color >> 16) & 0xff) / 255f;
+    float green = ((color >> 8) & 0xff) / 255f;
+    float blue = (color & 0xff) / 255f;
+    float luminance = 0.2126f * red + 0.7152f * green + 0.0722f * blue;
+    return clampOpacity(alpha * luminance * opacity);
   }
 
   private RectF calculatePathBounds(Path path) {

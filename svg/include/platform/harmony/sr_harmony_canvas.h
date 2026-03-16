@@ -30,6 +30,7 @@ class SrHarmonyCanvas : public canvas::SrCanvas {
   ~SrHarmonyCanvas() override;
   void Save() override;
   void Restore() override;
+  bool SupportsMasking() const override { return true; }
   void SetAntiAlias(bool anti_alias);
   void DrawLine(const char*, float x1, float y1, float x2, float y2,
                 const SrSVGRenderState& render_state) override;
@@ -74,6 +75,11 @@ class SrHarmonyCanvas : public canvas::SrCanvas {
   void Translate(float x, float y) override;
   void Transform(const float (&form)[6]) override;
   void ClipPath(canvas::Path* path, SrSVGFillRule clip_rule) override;
+  void SaveLayer(const SrSVGBox* bounds = nullptr) override;
+  void RestoreLayer() override;
+  void SetBlendMode(canvas::SrCanvasBlendMode blend_mode) override;
+  void SetMaskIsLuminance(bool is_luminance) override;
+  void ApplyLuminanceToAlpha() override;
 
  private:
   OH_Drawing_Canvas* context_{nullptr};
@@ -85,6 +91,8 @@ class SrHarmonyCanvas : public canvas::SrCanvas {
   std::unordered_map<std::string, canvas::LinearGradientModel> lg_models_;
   std::unordered_map<std::string, canvas::RadialGradientModel> rg_models_;
   bool anti_alias_{true};
+  canvas::SrCanvasBlendMode blend_mode_{canvas::SrCanvasBlendMode::kSrcOver};
+  bool mask_is_luminance_{false};
 
   void FillPath(OH_Drawing_Path* path, const SrSVGRenderState& render_state);
   void StrokePath(OH_Drawing_Path* path, const SrSVGRenderState& render_state);

@@ -39,6 +39,15 @@ static CGFloat GetAlphaFromI32(uint32_t color, float opacity) {
   return ((color & 0xFF000000) >> 24) / 255.f * opacity;
 }
 
+static CGFloat GetMaskLuminanceAlphaFromI32(uint32_t color, float opacity) {
+  CGFloat alpha = ((color & 0xFF000000) >> 24) / 255.f;
+  CGFloat red = GetRedFromI32(color);
+  CGFloat green = GetGreenFromI32(color);
+  CGFloat blue = GetBlueFromI32(color);
+  CGFloat luminance = 0.2126f * red + 0.7152f * green + 0.0722f * blue;
+  return alpha * luminance * opacity;
+}
+
 static void SRSVGArcToBezier(CGMutablePathRef p, double cx, double cy, double a,
                              double b, double e1x, double e1y, double theta,
                              double start, double sweep) {
@@ -146,7 +155,8 @@ namespace ios {
 
 static void MakeGradientColorsAndOffsets(const canvas::GradientModel& model,
                                          std::vector<CGFloat>& offsets,
-                                         std::vector<CGFloat>& colors) {
+                                         std::vector<CGFloat>& colors,
+                                         bool use_luminance_as_alpha) {
   size_t stopSize = model.stops_.size();
   if (!stopSize) {
     // If there are no stops defined, we are to treat it as paint = 'none'
@@ -165,12 +175,22 @@ static void MakeGradientColorsAndOffsets(const canvas::GradientModel& model,
       // If it doesn't we need to replace it with the previous value.
       offsets.push_back(lastOffset);
     }
-    // prepare color
-    colors.push_back(GetRedFromI32(stop.stopColor.color));
-    colors.push_back(GetGreenFromI32(stop.stopColor.color));
-    colors.push_back(GetBlueFromI32(stop.stopColor.color));
-    colors.push_back(
-        GetAlphaFromI32(stop.stopColor.color, stop.stopOpacity.value));
+    // During DstIn mask rendering, SVG luminance masks should contribute via
+    // alpha, not RGB. Encode luminance into alpha directly so black punches
+    // holes and white preserves content.
+    if (use_luminance_as_alpha) {
+      colors.push_back(1.f);
+      colors.push_back(1.f);
+      colors.push_back(1.f);
+      colors.push_back(
+          GetMaskLuminanceAlphaFromI32(stop.stopColor.color, stop.stopOpacity.value));
+    } else {
+      colors.push_back(GetRedFromI32(stop.stopColor.color));
+      colors.push_back(GetGreenFromI32(stop.stopColor.color));
+      colors.push_back(GetBlueFromI32(stop.stopColor.color));
+      colors.push_back(
+          GetAlphaFromI32(stop.stopColor.color, stop.stopOpacity.value));
+    }
   }
   return;
 }
@@ -178,7 +198,8 @@ static void MakeGradientColorsAndOffsets(const canvas::GradientModel& model,
 static void DrawLinearGradient(CGContextRef cgContext,
                                const canvas::LinearGradientModel& lgModel,
                                CGMutablePathRef cgPath, SrSVGFillRule fillRule,
-                               bool isStroke) {
+                               bool isStroke,
+                               bool use_luminance_as_alpha) {
   if (!cgContext || !cgPath || lgModel.stop_size() == 0) {
     // If there are no stops defined, we are to treat it as paint = 'none'
     return;
@@ -186,7 +207,8 @@ static void DrawLinearGradient(CGContextRef cgContext,
   CGContextSaveGState(cgContext);
   std::vector<CGFloat> offsets;
   std::vector<CGFloat> colors;
-  MakeGradientColorsAndOffsets(lgModel, offsets, colors);
+  MakeGradientColorsAndOffsets(lgModel, offsets, colors,
+                               use_luminance_as_alpha);
   CGColorSpaceRef cgColorSpace = CGColorSpaceCreateDeviceRGB();
   CGGradientRef gradientRef = CGGradientCreateWithColorComponents(
       cgColorSpace, colors.data(), offsets.data(), lgModel.stop_size());
@@ -234,7 +256,8 @@ static void DrawLinearGradient(CGContextRef cgContext,
 static void DrawRadialGradient(CGContextRef cgContext,
                                const canvas::RadialGradientModel& rgModel,
                                CGMutablePathRef cgPath, SrSVGFillRule fillRule,
-                               bool isStroke) {
+                               bool isStroke,
+                               bool use_luminance_as_alpha) {
   if (!cgContext || !cgPath || rgModel.stop_size() == 0) {
     // If there are no stops defined, we are to treat it as paint = 'none'
     return;
@@ -242,7 +265,8 @@ static void DrawRadialGradient(CGContextRef cgContext,
   CGContextSaveGState(cgContext);
   std::vector<CGFloat> offsets;
   std::vector<CGFloat> colors;
-  MakeGradientColorsAndOffsets(rgModel, offsets, colors);
+  MakeGradientColorsAndOffsets(rgModel, offsets, colors,
+                               use_luminance_as_alpha);
   CGColorSpaceRef cgColorSpace = CGColorSpaceCreateDeviceRGB();
   CGGradientRef gradientRef = CGGradientCreateWithColorComponents(
       cgColorSpace, colors.data(), offsets.data(), rgModel.stop_size());
@@ -336,12 +360,18 @@ SrIOSCanvas::~SrIOSCanvas() {
 void SrIOSCanvas::FillPath(CGMutablePathRef cgPath,
                            const SrSVGRenderState& renderState) {
   CGContextSaveGState(_context);
+  bool use_luminance_as_alpha =
+      mask_is_luminance_ &&
+      blend_mode_ == canvas::SrCanvasBlendMode::kDstIn;
   if (renderState.fill_opacity != 0) {
     CGContextSetAlpha(_context, renderState.fill_opacity);
   }
   if (!renderState.fill) {
     // if fill is null, we should set fill color to black and apply fill opacity
-    CGContextSetFillColorWithColor(_context, UIColor.blackColor.CGColor);
+    UIColor* fill_color = use_luminance_as_alpha
+                              ? [UIColor colorWithWhite:1.f alpha:0.f]
+                              : UIColor.blackColor;
+    CGContextSetFillColorWithColor(_context, fill_color.CGColor);
     CGContextAddPath(_context, cgPath);
     if (renderState.fill_rule == SR_SVG_FILL) {
       CGContextFillPath(_context);
@@ -349,9 +379,15 @@ void SrIOSCanvas::FillPath(CGMutablePathRef cgPath,
       CGContextEOFillPath(_context);
     }
   } else if (renderState.fill && renderState.fill->type == SERVAL_PAINT_COLOR) {
+    UIColor* fill_color =
+        use_luminance_as_alpha
+            ? [UIColor colorWithWhite:1.f
+                                alpha:GetMaskLuminanceAlphaFromI32(
+                                          renderState.fill->content.color.color,
+                                          1.f)]
+            : GetUIColorFromI32(renderState.fill->content.color.color);
     CGContextSetFillColorWithColor(
-        _context,
-        GetUIColorFromI32(renderState.fill->content.color.color).CGColor);
+        _context, fill_color.CGColor);
     CGContextAddPath(_context, cgPath);
     if (renderState.fill_rule == SR_SVG_FILL) {
       CGContextFillPath(_context);
@@ -364,13 +400,13 @@ void SrIOSCanvas::FillPath(CGMutablePathRef cgPath,
     if (it1 != lg_models_.end()) {
       const canvas::LinearGradientModel& lgModel = it1->second;
       DrawLinearGradient(_context, lgModel, cgPath, renderState.fill_rule,
-                         false);
+                         false, use_luminance_as_alpha);
     }
     auto it2 = rg_models_.find(iri);
     if (it2 != rg_models_.end()) {
       const canvas::RadialGradientModel& rgModel = it2->second;
       DrawRadialGradient(_context, rgModel, cgPath, renderState.fill_rule,
-                         false);
+                         false, use_luminance_as_alpha);
     }
   }
   CGContextRestoreGState(_context);
@@ -379,6 +415,9 @@ void SrIOSCanvas::FillPath(CGMutablePathRef cgPath,
 void SrIOSCanvas::StrokePath(CGMutablePathRef cgPath,
                              const SrSVGRenderState& renderState) {
   CGContextSaveGState(_context);
+  bool use_luminance_as_alpha =
+      mask_is_luminance_ &&
+      blend_mode_ == canvas::SrCanvasBlendMode::kDstIn;
   if (renderState.stroke_opacity != 0) {
     CGContextSetAlpha(_context, renderState.stroke_opacity);
   }
@@ -426,9 +465,15 @@ void SrIOSCanvas::StrokePath(CGMutablePathRef cgPath,
     }
   }
   if (renderState.stroke && renderState.stroke->type == SERVAL_PAINT_COLOR) {
+    UIColor* stroke_color =
+        use_luminance_as_alpha
+            ? [UIColor colorWithWhite:1.f
+                                alpha:GetMaskLuminanceAlphaFromI32(
+                                          renderState.stroke->content.color.color,
+                                          1.f)]
+            : GetUIColorFromI32(renderState.stroke->content.color.color);
     CGContextSetStrokeColorWithColor(
-        _context,
-        GetUIColorFromI32(renderState.stroke->content.color.color).CGColor);
+        _context, stroke_color.CGColor);
     CGContextAddPath(_context, cgPath);
     CGContextStrokePath(_context);
   } else if (renderState.stroke &&
@@ -438,13 +483,13 @@ void SrIOSCanvas::StrokePath(CGMutablePathRef cgPath,
     if (it1 != lg_models_.end()) {
       const canvas::LinearGradientModel& lgModel = it1->second;
       DrawLinearGradient(_context, lgModel, cgPath, renderState.fill_rule,
-                         true);
+                         true, use_luminance_as_alpha);
     }
     auto it2 = rg_models_.find(iri);
     if (it2 != rg_models_.end()) {
       const canvas::RadialGradientModel& rgModel = it2->second;
       DrawRadialGradient(_context, rgModel, cgPath, renderState.fill_rule,
-                         true);
+                         true, use_luminance_as_alpha);
     }
   }
   CGContextRestoreGState(_context);
@@ -709,6 +754,36 @@ void SrIOSCanvas::ClipPath(canvas::Path* path, SrSVGFillRule clip_rule) {
       CGContextClip(_context);
     }
   }
+}
+
+void SrIOSCanvas::SaveLayer(const SrSVGBox* bounds) {
+  // CGContextBeginTransparencyLayer creates an off-screen buffer for compositing.
+  // All subsequent drawing is redirected to this buffer until RestoreLayer().
+  // The transparency layer starts fully transparent by default.
+  CGContextBeginTransparencyLayer(_context, NULL);
+}
+
+void SrIOSCanvas::RestoreLayer() {
+  CGContextEndTransparencyLayer(_context);
+}
+
+void SrIOSCanvas::SetBlendMode(canvas::SrCanvasBlendMode blend_mode) {
+  blend_mode_ = blend_mode;
+  if (blend_mode == canvas::SrCanvasBlendMode::kDstIn) {
+    CGContextSetBlendMode(_context, kCGBlendModeDestinationIn);
+  } else {
+    CGContextSetBlendMode(_context, kCGBlendModeNormal);
+  }
+}
+
+void SrIOSCanvas::SetMaskIsLuminance(bool is_luminance) {
+  mask_is_luminance_ = is_luminance;
+}
+
+void SrIOSCanvas::ApplyLuminanceToAlpha() {
+  // iOS converts luminance to alpha during mask drawing in FillPath/StrokePath
+  // and gradient rendering when DstIn masking is active, so no post-process
+  // step is required here.
 }
 
 canvas::PathFactory* SrIOSCanvas::PathFactory() {

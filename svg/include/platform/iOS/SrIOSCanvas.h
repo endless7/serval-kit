@@ -133,6 +133,11 @@ class SrIOSCanvas : public canvas::SrCanvas {
   void Translate(float x, float y) override;
   void Transform(const float (&form)[6]) override;
   void ClipPath(canvas::Path*, SrSVGFillRule clip_rule) override;
+  void SaveLayer(const SrSVGBox* bounds = nullptr) override;
+  void RestoreLayer() override;
+  void SetBlendMode(canvas::SrCanvasBlendMode blend_mode) override;
+  void SetMaskIsLuminance(bool is_luminance) override;
+  void ApplyLuminanceToAlpha() override;
 
   CGContextRef Context() { return _context; }
 
@@ -147,6 +152,8 @@ class SrIOSCanvas : public canvas::SrCanvas {
   std::unique_ptr<PathFactoryQuartz2D> path_factory_;
   std::unordered_map<std::string, canvas::LinearGradientModel> lg_models_;
   std::unordered_map<std::string, canvas::RadialGradientModel> rg_models_;
+  canvas::SrCanvasBlendMode blend_mode_{canvas::SrCanvasBlendMode::kSrcOver};
+  bool mask_is_luminance_{false};
 };
 
 }  // namespace ios
